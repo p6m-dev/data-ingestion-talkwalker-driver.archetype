@@ -1,0 +1,8 @@
+boto3
+fake-useragent
+requests
+python-dotenv
+newspaper3k
+watchtower
+flask
+

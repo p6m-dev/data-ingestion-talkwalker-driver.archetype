@@ -1,0 +1,139 @@
+name: Dev Build & Deploy
+
+on:
+  workflow_call:
+    secrets:
+      ARTIFACTORY_TOKEN:
+        required: true
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_IDENTITY_TOKEN:
+        required: true
+      UPDATE_MANIFEST_TOKEN:
+        required: true
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+    inputs:
+      ARTIFACTORY_REGISTRY:
+        required: true
+        type: string
+      AWS_ACCOUNT_ID:
+        required: false
+        type: string
+      AWS_TFSTATE_BUCKET:
+        required: false
+        type: string
+      AWS_REGION:
+        required: false
+        type: string
+      APPS:
+        required: true
+        type: string
+      DOCKER_REPO:
+        required: true
+        type: string
+
+env:
+  ARTIFACTORY_USERNAME: ${{'{'}}{ secrets.ARTIFACTORY_USERNAME }}
+  ARTIFACTORY_IDENTITY_TOKEN: ${{'{'}}{ secrets.ARTIFACTORY_IDENTITY_TOKEN }}
+  UPDATE_MANIFEST_TOKEN: ${{'{'}}{ secrets.UPDATE_MANIFEST_TOKEN }}
+  ARTIFACTORY_TOKEN: ${{'{'}}{ secrets.ARTIFACTORY_TOKEN }}
+  ARTIFACTORY_REGISTRY: ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}
+  INPUT_GITHUB_TOKEN: ${{'{'}}{ secrets.GITHUB_TOKEN }}
+  AWS_DEFAULT_REGION: ${{'{'}}{ inputs.AWS_REGION }}
+  AWS_REGION: ${{'{'}}{ inputs.AWS_REGION }}
+  AWS_DEFAULT_OUTPUT: json
+  AWS_ACCESS_KEY_ID: ${{'{'}}{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{'{'}}{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{'{'}}{ steps.docker_build.outputs.digest }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Login to Artifactory Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}
+          username: ${{'{'}}{ secrets.ARTIFACTORY_USERNAME }}
+          password: ${{'{'}}{ secrets.ARTIFACTORY_IDENTITY_TOKEN }}
+
+      - name: Build Docker Image, Tag, and Push (Tag is SHA)
+        id: docker_build
+        run: |
+          ls -alh
+          cd ./servers
+          echo "=== building docker image  -- Part 1 ==="
+          echo "ARTIFACTORY_REGISTRY = "
+          echo ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}
+          echo "DOCKER_REPO = "
+          echo ${{'{'}}{ inputs.DOCKER_REPO }}
+          echo "APPS = "
+          echo ${{'{'}}{ inputs.APPS }} 
+          echo "sha = "
+          echo ${{'{'}}{ github.sha }} 
+          echo "sha tag = "
+          echo ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{ inputs.DOCKER_REPO }}/${{'{'}}{ inputs.APPS }}:${{'{'}}{ github.sha }} 
+          echo "building docker image with sha and latest tag in a single build"
+          docker build -t ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{ inputs.DOCKER_REPO }}/${{'{'}}{ inputs.APPS }}:${{'{'}}{ github.sha }} -f talkwalker_driver/Dockerfile  .
+          echo "sha_var=${{'{'}}{ github.sha }}" >> $GITHUB_ENV
+          docker image ls
+          echo "=== pushing docker image (sha tag) -- Part 2 ==="
+          echo "pushing docker image to repo"
+          echo docker push ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{ inputs.DOCKER_REPO }}/${{'{'}}{ inputs.APPS }}:${{'{'}}{ github.sha }}
+          PUSH_OUTPUT=$(docker push ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{ inputs.DOCKER_REPO }}/${{'{'}}{ inputs.APPS }}:${{'{'}}{ github.sha }})
+          echo "push_output $PUSH_OUTPUT"
+          echo "::set-output name=push_output::$PUSH_OUTPUT"
+
+
+      - name: Build Docker Image, Tag, and Push (Tag is latest)
+        id: docker_build_2
+        run: |
+          ls -alh
+          cd ./servers
+          echo "=== building docker image  -- Part 1 ==="
+          echo "ARTIFACTORY_REGISTRY = "
+          echo ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}
+          echo "DOCKER_REPO = "
+          echo ${{'{'}}{ inputs.DOCKER_REPO }}
+          echo "APPS = "
+          echo ${{'{'}}{ inputs.APPS }} 
+          echo "building docker image latest tag in a single build"
+          docker build -t ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{ inputs.DOCKER_REPO }}/${{'{'}}{ inputs.APPS }}:latest -f talkwalker_driver/Dockerfile  .
+          docker image ls
+          echo "=== pushing docker image (latest tag) -- Part 2 ==="
+          echo ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{ inputs.DOCKER_REPO }}/${{'{'}}{ inputs.APPS }}:latest
+          docker push ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{ inputs.DOCKER_REPO }}/${{'{'}}{ inputs.APPS }}:latest
+
+      - name: Get Image Digest
+        id: get_digest
+        run: |
+          FULL_DIGEST=$(docker image inspect ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{inputs.DOCKER_REPO}}/${{'{'}}{ inputs.APPS }}:${{'{'}}{ github.sha }} --format='{{'{'}}{index .RepoDigests 0}}')
+          echo "FULL_DIGEST=$FULL_DIGEST" 
+          DIGEST=${FULL_DIGEST#*@}
+          echo "DIGEST=$DIGEST" >> $GITHUB_ENV
+          echo "::set-output name=digest::$DIGEST"
+
+      - name: Trigger Update Image Digest
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo github.ref= ${{'{'}}{ github.ref }}
+          echo digest = ${{'{'}}{ steps.get_digest.outputs.digest }}
+          echo platform_dispatch_url = ${{'{'}}{ vars.PLATFORM_DISPATCH_URL }}
+          curl -X POST \
+            -H "Accept: application/vnd.github.everest-preview+json" \
+            -H "Authorization: token ${{'{'}}{ secrets.UPDATE_MANIFEST_TOKEN }}" \
+            ${{'{'}}{ vars.PLATFORM_DISPATCH_URL }} \
+            --fail-with-body \
+            -d "{\"event_type\": \"update-digest\", \"client_payload\": {\"repository\": \"${GITHUB_REPOSITORY}\", \"directory_name\": \"talkwalker\",  \"resource_directory_name\":\"$(basename ${GITHUB_REPOSITORY})\",    \"environment_dir\": \"dev\", \"digest\": \"${{'{'}}{ steps.get_digest.outputs.digest }}\"}}"
+
+      - name: Cleanup
+        if: always()
+        run: docker rmi ${{'{'}}{ inputs.ARTIFACTORY_REGISTRY }}/${{'{'}}{inputs.DOCKER_REPO}}/${{'{'}}{ inputs.APPS }}:${{'{'}}{ github.sha }}
+

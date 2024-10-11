@@ -1,0 +1,9 @@
+---
+description: "Talkwalker Driver archetype for Unstructured Data Ingestion"
+authors: ["Ricky Datta, Asad Iqbal, Cenk Dolek"]
+languages: []
+frameworks: []
+tags: []
+
+requires:
+  archetect: "2.0.0-ALPHA.10"
